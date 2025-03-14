@@ -1,6 +1,5 @@
 import asyncio
 from aiogram import Bot, Dispatcher
-
 # Импортируем API токен из конфиг-файла
 from config import API_TOKEN
 # Импортируем хендлеры
@@ -17,10 +16,8 @@ dp = Dispatcher()
 async def main():
     # Создаем таблицу базы данных
     await create_table()
-
     # Регистрируем хэндлеры
     setup_handlers(dp)
-
     # Запускаем процесс поллинга новых апдейтов
     await dp.start_polling(bot)
 

@@ -13,9 +13,8 @@ logging.basicConfig(level=logging.INFO)
 
 
 def setup_handlers(dp):
-    """
-    Регистрация всех обработчиков команд и коллбэков.
-    """
+    # Регистрация всех обработчиков команд и коллбэков.
+    
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_quiz, Command("quiz"))
     dp.message.register(cmd_stats, Command("stats"))
@@ -25,9 +24,8 @@ def setup_handlers(dp):
 
 
 async def cmd_start(message: types.Message):
-    """
-    Обработчик команды /start.
-    """
+    # Обработчик команды /start.
+    
     builder = ReplyKeyboardBuilder()
     builder.add(types.KeyboardButton(text="Начать игру"))
 
@@ -49,9 +47,8 @@ async def cmd_quiz(message: types.Message):
 
 
 async def process_answer(callback: types.CallbackQuery):
-    """
-    Обработчик нажатия на кнопку с ответом.
-    """
+    # Обработчик нажатия на кнопку с ответом.
+   
     await callback.bot.edit_message_reply_markup(
         chat_id=callback.from_user.id,
         message_id=callback.message.message_id,
@@ -112,9 +109,8 @@ async def process_answer(callback: types.CallbackQuery):
 dp = Dispatcher()
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
-    """
-    Команда /stats для просмотра статистики всех игроков.
-    """
+    # Команда /stats для просмотра статистики всех игроков.
+
     results = await get_all_results()
     if not results:
         await message.answer("Пока что никто не прошел квиз.")
@@ -128,9 +124,8 @@ async def cmd_stats(message: types.Message):
 
 
 async def get_question(message, user_id):
-    """
-    Отправляет следующий вопрос пользователю.
-    """
+    # Отправляет следующий вопрос пользователю.
+    
     current_question_index = await get_quiz_index(user_id)
     correct_index = quiz_data[current_question_index]['correct_option']
     opts = quiz_data[current_question_index]['options']
@@ -139,9 +134,7 @@ async def get_question(message, user_id):
 
 
 async def new_quiz(message):
-    """
-    Начинает новый квиз для пользователя.
-    """
+   # Начинает новый квиз для пользователя.
     user_id = message.from_user.id
 
     # Очищаем предыдущие ответы пользователя
