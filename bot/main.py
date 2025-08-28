@@ -381,5 +381,11 @@ def simulate_btc_fall(
 		logger.info("Stopped by user")
 
 
+# Register alias so underscores also work
+try:
+	app.command(name="simulate_btc_fall")(simulate_btc_fall)  # alias for simulate-btc-fall
+except Exception:
+	pass
+
 if __name__ == "__main__":
 	app()
