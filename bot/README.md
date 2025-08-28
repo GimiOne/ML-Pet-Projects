@@ -10,6 +10,7 @@
 - Отдельный CSV‑лог сделок с PnL (`/workspace/bot/logs/trades.csv`)
 - На каждом тике вывод в консоль: текущая цена BTC, текущая цена выбранной альты и баланс HL
 - Мгновенная команда CLI для открытия шорта без стратегии: `short`
+- Симуляция падения BTC с реальным входом при достижении порога: `simulate_btc_fall`
 
 ## Структура проекта
 ```
@@ -17,14 +18,17 @@
   ├─ prices/                # Поставщики цен
   │   ├─ base.py            # Общий интерфейс + PriceTick
   │   ├─ binance.py         # Онлайн цены (Binance public REST)
+  │   ├─ hl_info.py         # Цены с HL Info (мейннет/тестнет)
   │   └─ manual.py          # Ручной провайдер (подставляем цены)
   ├─ exchanges/
-  │   └─ hl.py              # Клиент Hyperliquid (dry-run по умолчанию; REST-плейсхолдеры для реальных ордеров)
+  │   └─ hl.py              # Клиент Hyperliquid SDK (order/trigger, cross/isolated, округления)
   ├─ strategy/
   │   └─ drop_and_short.py  # Стратегия: детект падения BTC → шорт альты + SL/TP
   ├─ logging_utils.py       # Настройка логирования и CSV-логгер сделок
   ├─ config.py              # Конфигурация стратегии и клиента HL (dataclasses)
-  ├─ main.py                # CLI (Typer): run-live / manual-once / manual-replay / short
+  ├─ main.py                # CLI (Typer): run-live / manual-once / manual-replay / short / simulate_btc_fall
+  ├─ scripts/
+  │   └─ hl_short_test.py   # Автономный тест постановки шорта на HL (SDK)
   ├─ requirements.txt       # Зависимости
   └─ README.md              # Это руководство
 ```
@@ -149,92 +153,82 @@ python3 -m bot.main run-live \
 
 Флаги:
 - `--alt-symbol` (str): символ альты (например, `ETHUSDT`).
-- `--qty` (float): размер позиции (монеты).
-- `--leverage` (float): плечо (для dry‑run логики).
+- `--qty` (float): размер позиции (монеты), используется если не задан `--usd-notional`.
+- `--usd-notional` (float): размер позиции в USD; перекрывает `--qty`.
+- `--leverage` (int): плечо для установки режима маржи на HL.
+- `--isolated` (bool): изолированная маржа (по умолчанию cross).
 - `--sl` (float, %): стоп‑лосс относительно цены входа.
 - `--tp` (float, %): тейк‑профит относительно цены входа.
 - `--sl-price` (float): стоп‑лосс абсолютной ценой.
 - `--tp-price` (float): тейк‑профит абсолютной ценой.
-- `--poll` (float, сек): частота проверки брекетов.
+- `--poll` (float, сек): частота проверки брекетов (для dry‑run сопровождения).
 - `--log-file` (str): путь к файлу логов.
 - `--trade-log` (str): путь к CSV‑логу сделок.
 - `--dry-run` (bool): сухой режим HL (по умолчанию `True`).
-- `--hl-api-key`, `--hl-api-secret` (str): ключ/секрет HL для реальных ордеров (используются при `--dry-run False`).
+- `--hl-api-secret` (str): приватный ключ (hex) для реальных ордеров.
+- `--use-testnet` (bool): использовать тестнет (по умолчанию False → мейннет).
 - `--verbose` (bool): подробный вывод.
 
 Примеры:
 ```bash
-# Dry-run
-python3 -m bot.main short --alt-symbol ETHUSDT --qty 1 --leverage 3 \
+# Dry-run, сайз в USD, изолированная маржа
+python3 -m bot.main short --alt-symbol ETHUSDT \
+  --usd-notional 50 --leverage 3 --isolated \
   --sl 1.5 --tp 2.0 --poll 2 --dry-run \
   --log-file /workspace/bot/logs/bot.log \
   --trade-log /workspace/bot/logs/trades.csv
 
-# Реальный режим (после адаптации эндпоинтов HL и экспорта ключей)
-export HL_API_KEY=...
-export HL_API_SECRET=...
-python3 -m bot.main short --alt-symbol ETHUSDT --qty 1 --leverage 3 \
-  --sl 1.5 --tp 2.0 --poll 2 \
-  --hl-api-key "$HL_API_KEY" --hl-api-secret "$HL_API_SECRET" \
+# Тестнет, реальные ордера
+python3 -m bot.main short --alt-symbol ETHUSDT \
+  --usd-notional 50 --leverage 3 --isolated \
+  --sl 1.5 --tp 2.0 --use-testnet \
+  --hl-api-secret 0xYOUR_TESTNET_PRIVATE_KEY_HEX \
   --dry-run False
 ```
 
-### 4) Боевой режим (реальные ордера HL)
-- В `exchanges/hl.py` добавлены REST‑плейсхолдеры. Перед использованием обязательно:
-  1. Сверьте и адаптируйте эндпоинты/параметры/сигнатуры по официальной документации HL.
-  2. Настройте ключи и секреты через окружение (или менеджер секретов) и пробросьте их в `HLConfig`/CLI.
-  3. Запускайте с `--dry-run False` только после тестирования. Добавьте полноценный риск‑менеджмент.
+### 4) Симуляция падения BTC → реальный вход (`simulate_btc_fall`)
+- Каждые `interval` секунд BTC снижается на `fall_step_pct` процентов от текущего
+- Когда падение от стартового уровня достигает `threshold` процентов — открывается реальный шорт по `alt-symbol` с SL/TP
+- Источник цен — HL Info (тестнет/мейннет)
 
-## CLI: команды и флаги
-Общий хелп:
+Флаги:
+- `--alt-symbol` (str): альта для входа.
+- `--threshold` (float): порог падения BTC (%) для входа.
+- `--qty` (float): размер позиции (монеты) если не используется `--usd-notional`.
+- `--usd-notional` (float): размер позиции в USD.
+- `--sl`/`--tp` (float, %): стоп‑лосс/тейк‑профит от цены входа.
+- `--leverage` (int), `--isolated` (bool): режим маржи.
+- `--interval` (сек): интервал симуляции (по умолчанию 2).
+- `--fall-step-pct` (%): шаг падения BTC за интервал (по умолчанию 0.1).
+- `--log-file`, `--trade-log`.
+- `--hl-api-secret` (hex): ключ для реальных ордеров.
+- `--use-testnet` (bool): тестнет (True) или мейннет (False).
+- `--verbose` (bool).
+
+Примеры:
 ```bash
-python3 -m bot.main --help
+# Тестнет (безопасно)
+python3 -m bot.main simulate_btc_fall \
+  --alt-symbol ETHUSDT \
+  --threshold 2.0 \
+  --usd-notional 50 \
+  --sl 2.0 --tp 2.0 \
+  --leverage 3 --isolated \
+  --interval 2 --fall-step-pct 0.1 \
+  --use-testnet \
+  --hl-api-secret 0xYOUR_TESTNET_PRIVATE_KEY_HEX
+
+# Мейннет (реальные средства!)
+python3 -m bot.main simulate_btc_fall \
+  --alt-symbol ETHUSDT \
+  --threshold 2.0 \
+  --usd-notional 50 \
+  --sl 2.0 --tp 2.0 \
+  --leverage 3 --isolated \
+  --interval 2 --fall-step-pct 0.1 \
+  --use-testnet False \
+  --hl-api-secret 0xYOUR_MAINNET_PRIVATE_KEY_HEX
 ```
-
-### Команда: run-live — Работа с онлайн‑ценами (Binance)
-- `--alt` (str): символ альты, например `ETHUSDT`.
-- `--threshold` (float): порог падения BTC от локального максимума (%) для входа.
-- `--lookback` (int, сек): окно поиска локального максимума BTC.
-- `--qty` (float): размер ордера по альте (монеты/контракты).
-- `--leverage` (float): плечо (для расчёта/логики dry‑run).
-- `--poll` (float, сек): период опроса цен.
-- `--sl` (float, %): стоп‑лосс от цены входа.
-- `--tp` (float, %): тейк‑профит от цены входа.
-- `--log-file` (str): путь к файлу логов (по умолчанию `/workspace/bot/logs/bot.log`).
-- `--trade-log` (str): путь к CSV‑логу сделок (по умолчанию `/workspace/bot/logs/trades.csv`).
-- `--dry-run` (bool): сухой режим клиента HL (по умолчанию `True`).
-- `--verbose` (bool): подробный вывод диагностики.
-
-### Команда: manual-once — Одноразовый шаг стратегии (ручные цены)
-- `--btc` (float): BTC цена.
-- `--alt` (float): ALT цена.
-- `--alt-symbol` (str): символ альты.
-- `--threshold` (float): порог падения BTC от локального максимума (%).
-- `--lookback` (int, сек): окно для локального максимума BTC.
-- `--qty` (float): размер ордера по альте.
-- `--leverage` (float): плечо (для dry‑run).
-- `--sl` (float, %): стоп‑лосс.
-- `--tp` (float, %): тейк‑профит.
-- `--log-file` (str): файл логов.
-- `--trade-log` (str): CSV‑лог сделок.
-- `--dry-run` (bool): сухой режим HL.
-- `--verbose` (bool): подробный вывод.
-
-### Команда: manual-replay — Пошаговая симуляция (ручные цены)
-- `--btc-seq` (CSV float): последовательность цен BTC, через запятую.
-- `--alt-seq` (CSV float): последовательность цен альты, через запятую.
-- `--alt-symbol` (str): символ альты.
-- `--threshold` (float): порог падения BTC от локального максимума (%).
-- `--lookback` (int, сек): окно для локального максимума BTC.
-- `--qty` (float): размер ордера по альте.
-- `--leverage` (float): плечо (для dry‑run).
-- `--sl` (float, %): стоп‑лосс.
-- `--tp` (float, %): тейк‑профит.
-- `--log-file` (str): файл логов.
-- `--trade-log` (str): CSV‑лог сделок.
-- `--dry-run` (bool): сухой режим HL.
-- `--verbose` (bool): подробный вывод.
-- `--step-delay` (float, сек): задержка между «тиками».
 
 ## Логика стратегии (вкратце)
 - Поддерживается история цен BTC в окне `lookback_seconds`.
