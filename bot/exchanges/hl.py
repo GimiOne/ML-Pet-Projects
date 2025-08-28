@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, Any
 import time
+from decimal import Decimal, ROUND_DOWN
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
@@ -73,6 +74,18 @@ class HyperliquidClient:
 		decimals = (6 if not is_spot else 8) - self._info.asset_to_sz_decimals[asset]
 		return round(float(f"{px:.5g}"), decimals)
 
+	def _round_size(self, coin: str, sz: float) -> float:
+		"""Округлить размер позиции до допустимого шага по szDecimals (ROUND_DOWN)."""
+		assert self._info is not None
+		asset = self._info.name_to_asset(coin)
+		sz_dec = self._info.asset_to_sz_decimals[asset]
+		quant = Decimal(1).scaleb(-sz_dec)  # 10^(-sz_dec)
+		val = (Decimal(str(sz))).quantize(quant, rounding=ROUND_DOWN)
+		# не допустить нуля при малом USD-ноционале
+		if val <= 0:
+			val = quant
+		return float(val)
+
 	def set_leverage_mode(self, symbol: str, leverage: int, is_cross: bool = True) -> Optional[OrderResult]:
 		if self._cfg.dry_run or not self._ex:
 			return OrderResult(True, None, f"DRY_RUN: set leverage={leverage} cross={is_cross} {symbol}", time.time())
@@ -92,11 +105,13 @@ class HyperliquidClient:
 		coin = self._coin_from_symbol(req.symbol)
 		is_buy = True if req.side.upper() == "BUY" else False
 		try:
+			# округляем размер под шаг актива
+			sz = self._round_size(coin, req.quantity)
 			if req.price is None:
-				resp: Any = self._ex.market_open(name=coin, is_buy=is_buy, sz=req.quantity)
+				resp: Any = self._ex.market_open(name=coin, is_buy=is_buy, sz=sz)
 			else:
 				limit_px = self._round_price(coin, req.price)
-				resp: Any = self._ex.order(name=coin, is_buy=is_buy, sz=req.quantity, limit_px=limit_px, order_type={"limit": {"tif": "Gtc"}})
+				resp: Any = self._ex.order(name=coin, is_buy=is_buy, sz=sz, limit_px=limit_px, order_type={"limit": {"tif": "Gtc"}})
 			repr_id = str(resp)
 			return OrderResult(True, repr_id, str(resp), time.time())
 		except Exception as e:
@@ -115,16 +130,17 @@ class HyperliquidClient:
 			return OrderResult(True, order_id, msg, time.time())
 		coin = self._coin_from_symbol(symbol)
 		try:
-			rounded = self._round_price(coin, trigger_px)
+			rounded_px = self._round_price(coin, trigger_px)
+			sz = self._round_size(coin, quantity)
 			resp: Any = self._ex.order(
 				name=coin,
 				is_buy=True,  # закрываем шорт
-				sz=quantity,
-				limit_px=rounded,
+				sz=sz,
+				limit_px=rounded_px,
 				order_type={
 					"trigger": {
 						"isMarket": True,
-						"triggerPx": rounded,
+						"triggerPx": rounded_px,
 						"tpsl": tpsl,
 					}
 				},
@@ -141,7 +157,8 @@ class HyperliquidClient:
 			return OrderResult(True, order_id, msg, time.time())
 		coin = self._coin_from_symbol(symbol)
 		try:
-			resp = self._ex.market_close(coin=coin, sz=quantity)
+			sz = self._round_size(coin, quantity)
+			resp = self._ex.market_close(coin=coin, sz=sz)
 			return OrderResult(True, str(resp), str(resp), time.time())
 		except Exception as e:
 			return OrderResult(False, None, f"error: {e}", time.time())

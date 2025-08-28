@@ -112,9 +112,19 @@ def main() -> None:
 
 	# Sizing
 	if USE_USD_SIZING:
-		sz = USD_NOTIONAL / mid
+		sz_raw = USD_NOTIONAL / mid
 	else:
-		sz = COIN_SIZE
+		sz_raw = COIN_SIZE
+
+	# Round size to szDecimals
+	asset = info.name_to_asset(coin)
+	sz_dec = info.asset_to_sz_decimals[asset]
+	from decimal import Decimal, ROUND_DOWN
+	sz_quant = Decimal(1).scaleb(-sz_dec)
+	sz = (Decimal(str(sz_raw))).quantize(sz_quant, rounding=ROUND_DOWN)
+	if sz <= 0:
+		sz = sz_quant
+	sz = float(sz)
 
 	# Market short
 	resp = ex.market_open(name=coin, is_buy=False, sz=sz, px=mid, slippage=SLIPPAGE)
