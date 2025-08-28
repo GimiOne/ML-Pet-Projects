@@ -1,6 +1,6 @@
 from typing import Optional
 import time
-from bot.prices.base import PriceProvider, PriceTick
+from .base import PriceProvider, PriceTick
 
 
 class ManualPriceProvider(PriceProvider):

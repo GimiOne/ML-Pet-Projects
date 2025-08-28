@@ -1,19 +1,14 @@
 import os
-import sys
 import time
 from typing import Optional, List
 import typer
 from rich import print
 
-# Allow running as a script: python /workspace/bot/main.py
-if __package__ is None or __package__ == "":
-	sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from bot.config import StrategyConfig, HLConfig
-from bot.prices import BinancePriceProvider, ManualPriceProvider
-from bot.exchanges import HyperliquidClient
-from bot.strategy import DropShortStrategy
-from bot.logging_utils import setup_logging, TradeCsvLogger
+from .config import StrategyConfig, HLConfig
+from .prices import BinancePriceProvider, ManualPriceProvider
+from .exchanges import HyperliquidClient
+from .strategy import DropShortStrategy
+from .logging_utils import setup_logging, TradeCsvLogger
 
 app = typer.Typer(help="Бот: шорт альткоина при падении BTC (учебный пример)")
 
