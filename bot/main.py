@@ -182,14 +182,15 @@ def short(
 	log_file: Optional[str] = typer.Option("/workspace/bot/logs/bot.log", help="Файл логов"),
 	trade_log: Optional[str] = typer.Option("/workspace/bot/logs/trades.csv", help="CSV лог сделок"),
 	dry_run: bool = typer.Option(True, help="Сухой режим HL"),
-	hl_api_key: Optional[str] = typer.Option(None, help="HL API key (реальные ордера при dry-run False)"),
-	hl_api_secret: Optional[str] = typer.Option(None, help="HL API secret"),
+	hl_api_key: Optional[str] = typer.Option(None, help="HL Address (опционально)"),
+	hl_api_secret: Optional[str] = typer.Option(None, help="HL Private Key (hex) для реальных ордеров"),
+	use_testnet: bool = typer.Option(False, help="Использовать тестнет HL"),
 	verbose: bool = typer.Option(True, help="Подробный вывод"),
 ):
 	"""Мгновенно открыть шорт с опциональными SL/TP, без детекта падения BTC."""
 	logger = setup_logging(log_file, level=20)
 	pp = BinancePriceProvider()
-	hl = HyperliquidClient(HLConfig(api_key=hl_api_key, api_secret=hl_api_secret, dry_run=dry_run))
+	hl = HyperliquidClient(HLConfig(api_key=hl_api_key, api_secret=hl_api_secret, dry_run=dry_run), use_testnet=use_testnet)
 	trade_logger = TradeCsvLogger(trade_log) if trade_log else None
 
 	entry_tick = pp.get_price(alt_symbol)
@@ -204,7 +205,6 @@ def short(
 
 	entry_ts = time.time()
 
-	# Рассчитываем ценовые уровни
 	computed_sl = None
 	computed_tp = None
 	if sl_price is not None:
@@ -222,9 +222,18 @@ def short(
 	if computed_tp:
 		logger.info(f"TP at {computed_tp:.6f}")
 
-	# Мониторинг до выхода по одному из брекетов (или вручную Ctrl+C)
+	# Если не dry-run — сразу поставить триггерные выходы (reduce-only) на HL
+	if not dry_run and (computed_sl or computed_tp):
+		if computed_tp:
+			resp_tp = hl.place_trigger_exit(alt_symbol, qty, computed_tp, tpsl="tp")
+			logger.info(f"Place TP trigger: {resp_tp}")
+		if computed_sl:
+			resp_sl = hl.place_trigger_exit(alt_symbol, qty, computed_sl, tpsl="sl")
+			logger.info(f"Place SL trigger: {resp_sl}")
+
+	# В dry-run режиме сопровождаем вручную по потокам цен
 	try:
-		while True:
+		while dry_run:
 			btc = pp.get_price("BTCUSDT")
 			alt = pp.get_price(alt_symbol)
 			balance = hl.get_balance()
