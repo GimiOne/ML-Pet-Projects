@@ -9,6 +9,7 @@
 - Логи в консоль и файл (`/workspace/bot/logs/bot.log` по умолчанию)
 - Отдельный CSV‑лог сделок с PnL (`/workspace/bot/logs/trades.csv`)
 - На каждом тике вывод в консоль: текущая цена BTC, текущая цена выбранной альты и баланс HL
+- Мгновенная команда CLI для открытия шорта без стратегии: `short`
 
 ## Структура проекта
 ```
@@ -23,7 +24,7 @@
   │   └─ drop_and_short.py  # Стратегия: детект падения BTC → шорт альты + SL/TP
   ├─ logging_utils.py       # Настройка логирования и CSV-логгер сделок
   ├─ config.py              # Конфигурация стратегии и клиента HL (dataclasses)
-  ├─ main.py                # CLI (Typer): run-live / manual-once / manual-replay
+  ├─ main.py                # CLI (Typer): run-live / manual-once / manual-replay / short
   ├─ requirements.txt       # Зависимости
   └─ README.md              # Это руководство
 ```
@@ -143,27 +144,46 @@ python3 -m bot.main run-live \
 ```
 Стратегия будет опрашивать public REST Binance, печатать цены и баланс HL (в dry‑run — фиктивный), входить по условиям, сопровождать SL/TP, писать логи и CSV‑сделки.
 
-### 3) Боевой режим (реальные ордера HL)
-- В `exchanges/hl.py` добавлены REST‑плейсхолдеры. Перед использованием обязательно:
-  1. Сверьте и адаптируйте эндпоинты/параметры/сигнатуры по официальной документации HL.
-  2. Настройте ключи и секреты через окружение (или менеджер секретов) и пробросьте их в `HLConfig`.
-  3. Запускайте с `--dry-run False` только после тестирования. Добавьте полноценный риск‑менеджмент.
+### 3) Мгновенный шорт без стратегии (CLI `short`)
+Открывает рыночный шорт выбранной альты и сопровождает его SL/TP.
 
-Пример запуска (после адаптации клиента и установки ключей):
+Флаги:
+- `--alt-symbol` (str): символ альты (например, `ETHUSDT`).
+- `--qty` (float): размер позиции (монеты).
+- `--leverage` (float): плечо (для dry‑run логики).
+- `--sl` (float, %): стоп‑лосс относительно цены входа.
+- `--tp` (float, %): тейк‑профит относительно цены входа.
+- `--sl-price` (float): стоп‑лосс абсолютной ценой.
+- `--tp-price` (float): тейк‑профит абсолютной ценой.
+- `--poll` (float, сек): частота проверки брекетов.
+- `--log-file` (str): путь к файлу логов.
+- `--trade-log` (str): путь к CSV‑логу сделок.
+- `--dry-run` (bool): сухой режим HL (по умолчанию `True`).
+- `--hl-api-key`, `--hl-api-secret` (str): ключ/секрет HL для реальных ордеров (используются при `--dry-run False`).
+- `--verbose` (bool): подробный вывод.
+
+Примеры:
 ```bash
+# Dry-run
+python3 -m bot.main short --alt-symbol ETHUSDT --qty 1 --leverage 3 \
+  --sl 1.5 --tp 2.0 --poll 2 --dry-run \
+  --log-file /workspace/bot/logs/bot.log \
+  --trade-log /workspace/bot/logs/trades.csv
+
+# Реальный режим (после адаптации эндпоинтов HL и экспорта ключей)
 export HL_API_KEY=...
 export HL_API_SECRET=...
-python3 -m bot.main run-live \
-  --alt ETHUSDT \
-  --threshold 1.0 \
-  --lookback 300 \
-  --qty 1 \
-  --leverage 3 \
-  --sl 2.0 \
-  --tp 2.0 \
-  --poll 2 \
+python3 -m bot.main short --alt-symbol ETHUSDT --qty 1 --leverage 3 \
+  --sl 1.5 --tp 2.0 --poll 2 \
+  --hl-api-key "$HL_API_KEY" --hl-api-secret "$HL_API_SECRET" \
   --dry-run False
 ```
+
+### 4) Боевой режим (реальные ордера HL)
+- В `exchanges/hl.py` добавлены REST‑плейсхолдеры. Перед использованием обязательно:
+  1. Сверьте и адаптируйте эндпоинты/параметры/сигнатуры по официальной документации HL.
+  2. Настройте ключи и секреты через окружение (или менеджер секретов) и пробросьте их в `HLConfig`/CLI.
+  3. Запускайте с `--dry-run False` только после тестирования. Добавьте полноценный риск‑менеджмент.
 
 ## CLI: команды и флаги
 Общий хелп:
@@ -185,15 +205,6 @@ python3 -m bot.main --help
 - `--dry-run` (bool): сухой режим клиента HL (по умолчанию `True`).
 - `--verbose` (bool): подробный вывод диагностики.
 
-Пример:
-```bash
-python3 -m bot.main run-live --alt AVAXUSDT --threshold 1.2 --lookback 300 \
-  --qty 2 --leverage 3 --poll 2 --sl 2.0 --tp 2.5 \
-  --log-file /workspace/bot/logs/bot.log \
-  --trade-log /workspace/bot/logs/trades.csv \
-  --dry-run --verbose
-```
-
 ### Команда: manual-once — Одноразовый шаг стратегии (ручные цены)
 - `--btc` (float): BTC цена.
 - `--alt` (float): ALT цена.
@@ -208,16 +219,6 @@ python3 -m bot.main run-live --alt AVAXUSDT --threshold 1.2 --lookback 300 \
 - `--trade-log` (str): CSV‑лог сделок.
 - `--dry-run` (bool): сухой режим HL.
 - `--verbose` (bool): подробный вывод.
-
-Пример:
-```bash
-python3 -m bot.main manual-once --btc 70000 --alt 3500 --alt-symbol ETHUSDT \
-  --threshold 1.0 --lookback 300 --qty 1 --leverage 3 \
-  --sl 1.5 --tp 2.5 \
-  --log-file /workspace/bot/logs/bot.log \
-  --trade-log /workspace/bot/logs/trades.csv \
-  --dry-run --verbose
-```
 
 ### Команда: manual-replay — Пошаговая симуляция (ручные цены)
 - `--btc-seq` (CSV float): последовательность цен BTC, через запятую.
@@ -234,18 +235,6 @@ python3 -m bot.main manual-once --btc 70000 --alt 3500 --alt-symbol ETHUSDT \
 - `--dry-run` (bool): сухой режим HL.
 - `--verbose` (bool): подробный вывод.
 - `--step-delay` (float, сек): задержка между «тиками».
-
-Пример:
-```bash
-python3 -m bot.main manual-replay --alt-symbol SUIUSDT \
-  --btc-seq 70000,69300,68900,68800 \
-  --alt-seq  140,   138,   133,   132 \
-  --threshold 1.0 --lookback 300 --qty 10 --leverage 3 \
-  --sl 2.0 --tp 2.0 \
-  --log-file /workspace/bot/logs/bot.log \
-  --trade-log /workspace/bot/logs/trades.csv \
-  --dry-run --verbose --step-delay 0
-```
 
 ## Логика стратегии (вкратце)
 - Поддерживается история цен BTC в окне `lookback_seconds`.
@@ -273,7 +262,6 @@ python3 -m bot.main --help
 python3 -m bot.main run-live --alt ETHUSDT --threshold 1.0 --lookback 300 --qty 1 \
   --leverage 3 --sl 2.0 --tp 2.0 --dry-run
 
-# Минимальный ручной тест
-python3 -m bot.main manual-once --btc 70000 --alt 3500 --alt-symbol ETHUSDT \
-  --threshold 1.0 --lookback 300 --qty 1 --leverage 3 --sl 2.0 --tp 2.0 --dry-run
+# Мгновенный шорт без стратегии (dry-run)
+python3 -m bot.main short --alt-symbol ETHUSDT --qty 1 --leverage 3 --sl 1.5 --tp 2.0 --dry-run
 ```
