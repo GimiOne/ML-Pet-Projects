@@ -1,0 +1,2 @@
+ts_open,ts_close,symbol,side,quantity,entry_price,exit_price,pnl,pnl_pct,reason
+1756373945.5066793,1756373945.5072963,ETHUSDT,SELL,1.0,3430.0,3500.0,-70.0,-2.0408163265306123,sl
