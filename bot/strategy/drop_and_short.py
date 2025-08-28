@@ -4,10 +4,10 @@ from typing import Deque, Tuple, Optional
 import time
 import logging
 
-from ..config import StrategyConfig
-from ..prices.base import PriceProvider, PriceTick
-from ..exchanges.hl import HyperliquidClient, OrderRequest, OrderResult
-from ..logging_utils import TradeCsvLogger
+from bot.config import StrategyConfig
+from bot.prices.base import PriceProvider, PriceTick
+from bot.exchanges.hl import HyperliquidClient, OrderRequest, OrderResult
+from bot.logging_utils import TradeCsvLogger
 
 
 @dataclass
