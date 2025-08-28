@@ -189,7 +189,30 @@ def short(
 	use_testnet: bool = typer.Option(False, help="Использовать тестнет HL"),
 	verbose: bool = typer.Option(True, help="Подробный вывод"),
 ):
-	"""Мгновенно открыть шорт с опциональными SL/TP, без детекта падения BTC."""
+	"""Мгновенно открыть шорт с опциональными SL/TP, без детекта падения BTC.
+
+	Опции:
+	- --usd-notional N    Размер позиции в USD (перекрывает --qty)
+	- --isolated          Изолированная маржа (по умолчанию cross)
+	- --leverage L        Плечо (устанавливается в режиме маржи на HL)
+	- --sl/--tp %         Стоп-лосс/тейк-профит от цены входа
+	- --sl-price/--tp-price Абсолютные уровни вместо процентов
+	- --use-testnet       Тестнет (True) или мейннет (False)
+	- --hl-api-secret     Приватный ключ кошелька (hex) для реальных ордеров
+
+	Примеры:
+	- Dry-run (без реальных ордеров):
+	  python3 -m bot.main short --alt-symbol ETHUSDT \
+	    --usd-notional 50 --leverage 3 --isolated \
+	    --sl 1.5 --tp 2.0 --dry-run
+
+	- Тестнет (реальные ордера в тестовой сети HL):
+	  python3 -m bot.main short --alt-symbol ETHUSDT \
+	    --usd-notional 50 --leverage 3 --isolated \
+	    --sl 1.5 --tp 2.0 --use-testnet \
+	    --hl-api-secret 0xYOUR_TESTNET_PRIVATE_KEY_HEX \
+	    --dry-run False
+	"""
 	logger = setup_logging(log_file, level=20)
 	pp = BinancePriceProvider()
 	hl = HyperliquidClient(HLConfig(api_key=hl_api_key, api_secret=hl_api_secret, dry_run=dry_run), use_testnet=use_testnet)
@@ -306,14 +329,34 @@ def simulate_btc_fall(
 	close_on_sim_hit: bool = typer.Option(False, help="При срабатывании SL/TP на симулированной цене закрывать позицию реально"),
 	log_file: Optional[str] = typer.Option("/workspace/bot/logs/bot.log", help="Файл логов"),
 	trade_log: Optional[str] = typer.Option("/workspace/bot/logs/trades.csv", help="CSV лог сделок"),
-	hl_api_secret: Optional[str] = typer.Option(None, help="HL Private Key (hex) для реальных ордеров на мейннете/тестнете"),
+	hl_api_secret: Optional[str] = typer.Option(None, help="HL Private Key (hex) для реальных ордеров на мейннетe/тестнете"),
 	use_testnet: bool = typer.Option(False, help="False для мейннета (реальные средства)"),
 	verbose: bool = typer.Option(True, help="Подробный вывод"),
 ):
 	"""Симуляция падения BTC каждые interval секунд; при падении >= threshold открывается шорт на альте с SL/TP.
 
-	- Можно симулировать и цену альты (sim_alt), чтобы проверить срабатывание SL/TP
-	- При close_on_sim_hit=True будет реальный выход маркетом, когда симулированная цена достигнет SL/TP
+	Расширения симуляции:
+	- --sim-alt            Симулировать цену альты синхронно с BTC
+	- --alt-mode MODE     follow|drop|rise: поведение альты
+	- --alt-beta B        чувствительность альты при follow (alt_delta = B * btc_delta)
+	- --close-on-sim-hit  Реально закрыть позицию маркетом при срабатывании на симулированной цене
+
+	Размер и маржа:
+	- --usd-notional USD  Размер позиции в USD (перекрывает --qty)
+	- --isolated, --leverage  Установка режима маржи/плеча на HL перед входом
+
+	Мейннет пример (реальные средства!):
+	python3 -m bot.main simulate-btc-fall \
+	  --alt-symbol ETHUSDT \
+	  --threshold 2.0 \
+	  --usd-notional 50 \
+	  --sl 1.0 --tp 1.0 \
+	  --leverage 3 --isolated \
+	  --interval 2 --fall-step-pct 0.1 \
+	  --sim-alt --alt-mode follow --alt-beta 1.2 \
+	  --close-on-sim-hit \
+	  --use-testnet False \
+	  --hl-api-secret 0xYOUR_MAINNET_PRIVATE_KEY_HEX
 	"""
 	logger = setup_logging(log_file, level=20)
 
