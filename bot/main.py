@@ -1,14 +1,19 @@
 import os
+import sys
 import time
 from typing import Optional, List
 import typer
 from rich import print
 
-from .config import StrategyConfig, HLConfig
-from .prices import BinancePriceProvider, ManualPriceProvider
-from .exchanges import HyperliquidClient
-from .strategy import DropShortStrategy
-from .logging_utils import setup_logging, TradeCsvLogger
+# Allow running as a script: python /workspace/bot/main.py
+if __package__ is None or __package__ == "":
+	sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from bot.config import StrategyConfig, HLConfig
+from bot.prices import BinancePriceProvider, ManualPriceProvider
+from bot.exchanges import HyperliquidClient, OrderRequest
+from bot.strategy import DropShortStrategy
+from bot.logging_utils import setup_logging, TradeCsvLogger
 
 app = typer.Typer(help="Бот: шорт альткоина при падении BTC (учебный пример)")
 
@@ -162,6 +167,104 @@ def manual_replay(
 		print(f"step={i} bp={bp} ap={ap} -> {res}")
 		if step_delay > 0:
 			time.sleep(step_delay)
+
+
+@app.command()
+def short(
+	alt_symbol: str = typer.Option("ETHUSDT", help="Символ альты для шорта (например ETHUSDT)"),
+	qty: float = typer.Option(1.0, help="Размер позиции (монеты)"),
+	leverage: float = typer.Option(3.0, help="Плечо (для dry-run логики)"),
+	sl: Optional[float] = typer.Option(None, help="Стоп-лосс (%) от цены входа"),
+	tp: Optional[float] = typer.Option(None, help="Тейк-профит (%) от цены входа"),
+	sl_price: Optional[float] = typer.Option(None, help="Стоп-лосс абсолютной ценой (для шорта: BUY закрытие)"),
+	tp_price: Optional[float] = typer.Option(None, help="Тейк-профит абсолютной ценой (для шорта: BUY закрытие)"),
+	poll: float = typer.Option(2.0, help="Период опроса цен для брекетов (сек)"),
+	log_file: Optional[str] = typer.Option("/workspace/bot/logs/bot.log", help="Файл логов"),
+	trade_log: Optional[str] = typer.Option("/workspace/bot/logs/trades.csv", help="CSV лог сделок"),
+	dry_run: bool = typer.Option(True, help="Сухой режим HL"),
+	hl_api_key: Optional[str] = typer.Option(None, help="HL API key (реальные ордера при dry-run False)"),
+	hl_api_secret: Optional[str] = typer.Option(None, help="HL API secret"),
+	verbose: bool = typer.Option(True, help="Подробный вывод"),
+):
+	"""Мгновенно открыть шорт с опциональными SL/TP, без детекта падения BTC."""
+	logger = setup_logging(log_file, level=20)
+	pp = BinancePriceProvider()
+	hl = HyperliquidClient(HLConfig(api_key=hl_api_key, api_secret=hl_api_secret, dry_run=dry_run))
+	trade_logger = TradeCsvLogger(trade_log) if trade_log else None
+
+	entry_tick = pp.get_price(alt_symbol)
+	entry_price = entry_tick.price
+	logger.info(f"Entry (market SELL) planned at ~{entry_price:.6f} {alt_symbol}")
+
+	res = hl.place_order(OrderRequest(symbol=alt_symbol, side="SELL", quantity=qty, leverage=leverage, price=None))
+	if not res.success:
+		logger.error(f"Short open failed: {res.message}")
+		raise typer.Exit(code=1)
+	logger.info(f"Short opened: order_id={res.order_id} qty={qty} entry~{entry_price}")
+
+	entry_ts = time.time()
+
+	# Рассчитываем ценовые уровни
+	computed_sl = None
+	computed_tp = None
+	if sl_price is not None:
+		computed_sl = float(sl_price)
+	elif sl is not None:
+		computed_sl = entry_price * (1.0 + sl / 100.0)
+
+	if tp_price is not None:
+		computed_tp = float(tp_price)
+	elif tp is not None:
+		computed_tp = entry_price * (1.0 - tp / 100.0)
+
+	if computed_sl:
+		logger.info(f"SL at {computed_sl:.6f}")
+	if computed_tp:
+		logger.info(f"TP at {computed_tp:.6f}")
+
+	# Мониторинг до выхода по одному из брекетов (или вручную Ctrl+C)
+	try:
+		while True:
+			btc = pp.get_price("BTCUSDT")
+			alt = pp.get_price(alt_symbol)
+			balance = hl.get_balance()
+			logger.info(f"BTC={btc.price:.4f} ALT({alt_symbol})={alt.price:.4f} Balance={balance}")
+
+			should_close = False
+			reason = None
+			if computed_tp is not None and alt.price <= computed_tp:
+				should_close = True
+				reason = "tp"
+			if computed_sl is not None and alt.price >= computed_sl:
+				should_close = True
+				reason = "sl"
+
+			if should_close:
+				close_res = hl.close_position(alt_symbol, qty, side="SELL")
+				if not close_res.success:
+					logger.error(f"Close failed: {close_res.message}")
+					raise typer.Exit(code=2)
+				pnl = -(alt.price - entry_price) * qty
+				pnl_pct = -(alt.price - entry_price) / entry_price * 100.0
+				logger.info(f"Position closed: reason={reason} exit={alt.price:.6f} pnl={pnl:.4f} pnl%={pnl_pct:.4f}")
+				if trade_logger:
+					trade_logger.log_trade(
+						ts_open=entry_ts,
+						ts_close=time.time(),
+						symbol=alt_symbol,
+						side="SELL",
+						quantity=qty,
+						entry_price=entry_price,
+						exit_price=alt.price,
+						pnl=pnl,
+						pnl_pct=pnl_pct,
+						reason=reason or "manual",
+					)
+				break
+
+			time.sleep(poll)
+	except KeyboardInterrupt:
+		logger.info("Stopped by user")
 
 
 if __name__ == "__main__":

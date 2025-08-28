@@ -1,7 +1,7 @@
 import requests
 import time
 from typing import Optional
-from .base import PriceProvider, PriceTick
+from bot.prices.base import PriceProvider, PriceTick
 
 
 class BinancePriceProvider(PriceProvider):

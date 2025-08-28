@@ -5,7 +5,7 @@ import hmac
 import hashlib
 import requests
 
-from ..config import HLConfig
+from bot.config import HLConfig
 
 
 @dataclass
@@ -96,7 +96,6 @@ class HyperliquidClient:
 
 	def get_balance(self) -> Optional[dict]:
 		if self._cfg.dry_run or not self._cfg.api_key or not self._cfg.api_secret:
-			# Возврат фиктивного баланса для отображения
 			return {"equity": 10000.0, "available": 9500.0, "currency": "USD"}
 			
 		endpoint = "/v1/account/balance"
