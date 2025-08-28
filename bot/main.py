@@ -107,8 +107,42 @@ def run_live(
 ):
 	"""Работа с онлайн-ценами; при падении BTC открывает шорт по альте с SL/TP.
 
-	Поддерживает USD-сайзинг (--usd-notional) и режим маржи (--isolated, --leverage).
-	Для реальных ордеров укажите --dry-run False и --hl-api-secret (и при необходимости --use-testnet False для мейннета).
+	Опции:
+	- --usd-notional USD   Сайзинг позиции в USD (перекрывает --qty)
+	- --qty QTY            Размер позиции в монетах (если не задан --usd-notional)
+	- --isolated           Изолированная маржа (по умолчанию cross)
+	- --leverage L         Плечо, устанавливается в режиме маржи на HL перед входом
+	- --sl/--tp %          Стоп-лосс/тейк-профит от цены входа, ставятся также как триггер-ордера
+	- --hl-api-secret HEX  Приватный ключ (hex) кошелька HL для реальных ордеров
+	- --use-testnet        Тестнет (True) или мейннет (False)
+	- --poll, --log-file, --trade-log, --verbose
+
+	Примеры:
+	- Тестнет (реальные ордера в тестовой сети HL):
+	  python3 -m bot.main run-live \
+	    --alt ETHUSDT \
+	    --threshold 2.0 --lookback 300 \
+	    --usd-notional 50 --leverage 3 --isolated \
+	    --sl 1.0 --tp 1.0 \
+	    --poll 2 \
+	    --log-file /workspace/bot/logs/bot.log \
+	    --trade-log /workspace/bot/logs/trades.csv \
+	    --use-testnet \
+	    --hl-api-secret 0xYOUR_TESTNET_PRIVATE_KEY_HEX \
+	    --dry-run False
+
+	- Мейннет (реальные средства!):
+	  python3 -m bot.main run-live \
+	    --alt ETHUSDT \
+	    --threshold 2.0 --lookback 300 \
+	    --usd-notional 50 --leverage 3 --isolated \
+	    --sl 1.0 --tp 1.0 \
+	    --poll 2 \
+	    --log-file /workspace/bot/logs/bot.log \
+	    --trade-log /workspace/bot/logs/trades.csv \
+	    --use-testnet False \
+	    --hl-api-secret 0xYOUR_MAINNET_PRIVATE_KEY_HEX \
+	    --dry-run False
 	"""
 	cfg = StrategyConfig(
 		btc_symbol="BTCUSDT",
