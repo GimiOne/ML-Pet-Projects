@@ -172,8 +172,10 @@ def manual_replay(
 @app.command()
 def short(
 	alt_symbol: str = typer.Option("ETHUSDT", help="Символ альты для шорта (например ETHUSDT)"),
-	qty: float = typer.Option(1.0, help="Размер позиции (монеты)"),
-	leverage: float = typer.Option(3.0, help="Плечо (для dry-run логики)"),
+	qty: float = typer.Option(1.0, help="Размер позиции (монеты), если не используется --usd-notional"),
+	usd_notional: Optional[float] = typer.Option(None, help="Размер позиции в USD (если указан, перекрывает --qty)"),
+	leverage: int = typer.Option(3, help="Плечо (используется при обновлении режима маржи)"),
+	isolated: bool = typer.Option(False, help="Включить изолированную маржу (по умолчанию cross)"),
 	sl: Optional[float] = typer.Option(None, help="Стоп-лосс (%) от цены входа"),
 	tp: Optional[float] = typer.Option(None, help="Тейк-профит (%) от цены входа"),
 	sl_price: Optional[float] = typer.Option(None, help="Стоп-лосс абсолютной ценой (для шорта: BUY закрытие)"),
@@ -197,11 +199,22 @@ def short(
 	entry_price = entry_tick.price
 	logger.info(f"Entry (market SELL) planned at ~{entry_price:.6f} {alt_symbol}")
 
-	res = hl.place_order(OrderRequest(symbol=alt_symbol, side="SELL", quantity=qty, leverage=leverage, price=None))
+	# Установка маржи: cross/isolated
+	lev_res = hl.set_leverage_mode(alt_symbol, leverage=leverage, is_cross=not isolated)
+	if lev_res:
+		logger.info(f"Leverage mode set: {lev_res}")
+
+	# USD sizing -> convert to coin qty
+	qty_final = qty
+	if usd_notional is not None:
+		qty_final = usd_notional / entry_price
+		logger.info(f"Sizing by USD: {usd_notional} -> qty {qty_final}")
+
+	res = hl.place_order(OrderRequest(symbol=alt_symbol, side="SELL", quantity=qty_final, leverage=float(leverage), price=None))
 	if not res.success:
 		logger.error(f"Short open failed: {res.message}")
 		raise typer.Exit(code=1)
-	logger.info(f"Short opened: order_id={res.order_id} qty={qty} entry~{entry_price}")
+	logger.info(f"Short opened: order_id={res.order_id} qty={qty_final} entry~{entry_price}")
 
 	entry_ts = time.time()
 
@@ -222,16 +235,14 @@ def short(
 	if computed_tp:
 		logger.info(f"TP at {computed_tp:.6f}")
 
-	# Если не dry-run — сразу поставить триггерные выходы (reduce-only) на HL
 	if not dry_run and (computed_sl or computed_tp):
 		if computed_tp:
-			resp_tp = hl.place_trigger_exit(alt_symbol, qty, computed_tp, tpsl="tp")
+			resp_tp = hl.place_trigger_exit(alt_symbol, qty_final, computed_tp, tpsl="tp")
 			logger.info(f"Place TP trigger: {resp_tp}")
 		if computed_sl:
-			resp_sl = hl.place_trigger_exit(alt_symbol, qty, computed_sl, tpsl="sl")
+			resp_sl = hl.place_trigger_exit(alt_symbol, qty_final, computed_sl, tpsl="sl")
 			logger.info(f"Place SL trigger: {resp_sl}")
 
-	# В dry-run режиме сопровождаем вручную по потокам цен
 	try:
 		while dry_run:
 			btc = pp.get_price("BTCUSDT")
@@ -249,11 +260,11 @@ def short(
 				reason = "sl"
 
 			if should_close:
-				close_res = hl.close_position(alt_symbol, qty, side="SELL")
+				close_res = hl.close_position(alt_symbol, qty_final, side="SELL")
 				if not close_res.success:
 					logger.error(f"Close failed: {close_res.message}")
 					raise typer.Exit(code=2)
-				pnl = -(alt.price - entry_price) * qty
+				pnl = -(alt.price - entry_price) * qty_final
 				pnl_pct = -(alt.price - entry_price) / entry_price * 100.0
 				logger.info(f"Position closed: reason={reason} exit={alt.price:.6f} pnl={pnl:.4f} pnl%={pnl_pct:.4f}")
 				if trade_logger:
@@ -262,7 +273,7 @@ def short(
 						ts_close=time.time(),
 						symbol=alt_symbol,
 						side="SELL",
-						quantity=qty,
+						quantity=qty_final,
 						entry_price=entry_price,
 						exit_price=alt.price,
 						pnl=pnl,

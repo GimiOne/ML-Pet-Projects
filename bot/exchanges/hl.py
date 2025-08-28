@@ -64,6 +64,25 @@ class HyperliquidClient:
 			return symbol[:-4]
 		return symbol
 
+	def _round_price(self, coin: str, px: float) -> float:
+		# Повторяем логику округления SDK для цены:
+		# decimals = (6 if perp else 8) - szDecimals
+		assert self._info is not None
+		asset = self._info.name_to_asset(coin)
+		is_spot = asset >= 10_000
+		decimals = (6 if not is_spot else 8) - self._info.asset_to_sz_decimals[asset]
+		return round(float(f"{px:.5g}"), decimals)
+
+	def set_leverage_mode(self, symbol: str, leverage: int, is_cross: bool = True) -> Optional[OrderResult]:
+		if self._cfg.dry_run or not self._ex:
+			return OrderResult(True, None, f"DRY_RUN: set leverage={leverage} cross={is_cross} {symbol}", time.time())
+		coin = self._coin_from_symbol(symbol)
+		try:
+			resp = self._ex.update_leverage(leverage=int(leverage), name=coin, is_cross=is_cross)
+			return OrderResult(True, None, str(resp), time.time())
+		except Exception as e:
+			return OrderResult(False, None, f"error: {e}", time.time())
+
 	def place_order(self, req: OrderRequest) -> OrderResult:
 		if self._cfg.dry_run or not self._ex:
 			order_id = f"dry-{int(time.time()*1000)}"
@@ -74,11 +93,10 @@ class HyperliquidClient:
 		is_buy = True if req.side.upper() == "BUY" else False
 		try:
 			if req.price is None:
-				# Рыночная через market_open (агрессивный лимит Ioc)
 				resp: Any = self._ex.market_open(name=coin, is_buy=is_buy, sz=req.quantity)
 			else:
-				# Лимитный GTC
-				resp: Any = self._ex.order(name=coin, is_buy=is_buy, sz=req.quantity, limit_px=req.price, order_type={"limit": {"tif": "Gtc"}})
+				limit_px = self._round_price(coin, req.price)
+				resp: Any = self._ex.order(name=coin, is_buy=is_buy, sz=req.quantity, limit_px=limit_px, order_type={"limit": {"tif": "Gtc"}})
 			repr_id = str(resp)
 			return OrderResult(True, repr_id, str(resp), time.time())
 		except Exception as e:
@@ -97,15 +115,16 @@ class HyperliquidClient:
 			return OrderResult(True, order_id, msg, time.time())
 		coin = self._coin_from_symbol(symbol)
 		try:
+			rounded = self._round_price(coin, trigger_px)
 			resp: Any = self._ex.order(
 				name=coin,
 				is_buy=True,  # закрываем шорт
 				sz=quantity,
-				limit_px=trigger_px,  # для isMarket=True safe fallback
+				limit_px=rounded,
 				order_type={
 					"trigger": {
 						"isMarket": True,
-						"triggerPx": trigger_px,
+						"triggerPx": rounded,
 						"tpsl": tpsl,
 					}
 				},
