@@ -83,6 +83,97 @@ class DropShortStrategy:
 		if self.state.first_trigger_ts is not None and not self._entry_window_active(now_ts):
 			self.state.first_trigger_ts = None
 
+	def _size_qty(self, alt_px: float) -> float:
+		if self.cfg.usd_notional is not None and self.cfg.usd_notional > 0:
+			return max(self.cfg.usd_notional / alt_px, 0.0)
+		return self.cfg.alt_order_qty
+
+	def on_tick(self) -> Optional[OrderResult]:
+		"""Основной шаг стратегии. Возвращает результат ордера, если был вход/выход."""
+		now_ts = time.time()
+
+		# Считываем цены
+		btc = self.price_provider.get_price(self.cfg.btc_symbol)
+		alt = self.price_provider.get_price(self.cfg.alt_symbol)
+
+		# Проверка типов и значений
+		if not isinstance(btc, PriceTick) or not isinstance(alt, PriceTick):
+			raise TypeError("Price provider must return PriceTick instances")
+		if btc.price <= 0 or alt.price <= 0:
+			raise ValueError("Received non-positive price from provider")
+
+		# Обновляем историю
+		self._append_history(btc.symbol, btc.price, btc.ts)
+		self._append_history(alt.symbol, alt.price, alt.ts)
+
+		# Логи текущих метрик
+		balance = self.exchange.get_balance()
+		self.log.info(f"BTC={btc.price:.4f} ALT({self.cfg.alt_symbol})={alt.price:.4f} Balance={balance}")
+
+		# Если есть позиция — проверить SL/TP
+		exit_res = self._check_sl_tp(alt.price)
+		if exit_res is not None:
+			return exit_res
+
+		# Обслуживаем окно входа
+		self._reset_trigger_if_window_passed(now_ts)
+
+		# Детект падения BTC
+		drawdown_pct = self._calc_btc_drawdown_pct(now_ts)
+		if self.cfg.verbose:
+			if drawdown_pct is None:
+				self.log.info("BTC drawdown: n/a")
+			else:
+				self.log.info(f"BTC drawdown: {drawdown_pct:.4f}% (threshold {self.cfg.drop_pct_threshold}%)")
+
+		if drawdown_pct is None or drawdown_pct < self.cfg.drop_pct_threshold:
+			return None
+
+		self._maybe_mark_first_trigger(now_ts)
+
+		# Проверка cooldown
+		if self._cooldown_active(now_ts):
+			self.log.info("Cooldown active, skip entry")
+			return None
+
+		# Разрешён вход только в окне entry_window_seconds
+		if not self._entry_window_active(now_ts):
+			self.log.info("Entry window not active, skip")
+			return None
+
+		# Если уже есть позиция — не открываем новую
+		if self.state.position_side is not None and self.state.position_qty > 0:
+			return None
+
+		# Установка маржи перед входом
+		lev_set = self.exchange.set_leverage_mode(self.cfg.alt_symbol, leverage=int(self.cfg.leverage), is_cross=not self.cfg.use_isolated)
+		if lev_set:
+			self.log.info(f"Leverage mode: {lev_set}")
+
+		# Рассчитать размер
+		qty = self._size_qty(alt.price)
+		order = OrderRequest(
+			symbol=self.cfg.alt_symbol,
+			side="SELL",
+			quantity=qty,
+			leverage=float(self.cfg.leverage),
+			price=None,
+		)
+		res = self.exchange.place_order(order)
+		if res.success:
+			self.state.last_entry_ts = now_ts
+			self.state.position_side = "SELL"
+			self.state.position_qty = qty
+			self.state.entry_price = alt.price
+			self.state.entry_ts = now_ts
+			self.log.info(f"Entered short: order_id={res.order_id} qty={self.state.position_qty} entry={self.state.entry_price}")
+			# Поставить on-chain триггеры, если доступно (не dry-run)
+			if self.cfg.take_profit_pct:
+				self.exchange.place_trigger_exit(self.cfg.alt_symbol, qty, self.state.entry_price * (1.0 - self.cfg.take_profit_pct / 100.0), tpsl="tp")
+			if self.cfg.stop_loss_pct:
+				self.exchange.place_trigger_exit(self.cfg.alt_symbol, qty, self.state.entry_price * (1.0 + self.cfg.stop_loss_pct / 100.0), tpsl="sl")
+		return res
+
 	def _try_close_with_reason(self, reason: str, alt_price: float) -> Optional[OrderResult]:
 		if not self.state.position_side or self.state.position_qty <= 0 or self.state.entry_price is None:
 			return None
@@ -134,81 +225,3 @@ class DropShortStrategy:
 			if alt_price <= sl_price:
 				return self._try_close_with_reason("sl", alt_price)
 		return None
-
-	def on_tick(self) -> Optional[OrderResult]:
-		"""Основной шаг стратегии. Возвращает результат ордера, если был вход/выход."""
-		now_ts = time.time()
-
-		# Считываем цены
-		btc = self.price_provider.get_price(self.cfg.btc_symbol)
-		alt = self.price_provider.get_price(self.cfg.alt_symbol)
-
-		# Проверка типов и значений
-		if not isinstance(btc, PriceTick) or not isinstance(alt, PriceTick):
-			raise TypeError("Price provider must return PriceTick instances")
-		if btc.price <= 0 or alt.price <= 0:
-			raise ValueError("Received non-positive price from provider")
-
-		# Обновляем историю
-		self._append_history(btc.symbol, btc.price, btc.ts)
-		self._append_history(alt.symbol, alt.price, alt.ts)
-
-		# Логи текущих метрик
-		balance = self.exchange.get_balance()
-		self.log.info(f"BTC={btc.price:.4f} ALT({self.cfg.alt_symbol})={alt.price:.4f} Balance={balance}")
-
-		# Если есть позиция — проверить SL/TP
-		exit_res = self._check_sl_tp(alt.price)
-		if exit_res is not None:
-			return exit_res
-
-		# Обслуживаем окно входа
-		self._reset_trigger_if_window_passed(now_ts)
-
-		# Детект падения BTC
-		drawdown_pct = self._calc_btc_drawdown_pct(now_ts)
-		if self.cfg.verbose:
-			if drawdown_pct is None:
-				self.log.info("BTC drawdown: n/a")
-			else:
-				self.log.info(f"BTC drawdown: {drawdown_pct:.4f}% (threshold {self.cfg.drop_pct_threshold}%)")
-
-		if drawdown_pct is None:
-			return None
-
-		if drawdown_pct >= self.cfg.drop_pct_threshold:
-			self._maybe_mark_first_trigger(now_ts)
-		else:
-			return None
-
-		# Проверка cooldown
-		if self._cooldown_active(now_ts):
-			self.log.info("Cooldown active, skip entry")
-			return None
-
-		# Разрешён вход только в окне entry_window_seconds
-		if not self._entry_window_active(now_ts):
-			self.log.info("Entry window not active, skip")
-			return None
-
-		# Если уже есть позиция — не открываем новую
-		if self.state.position_side is not None and self.state.position_qty > 0:
-			return None
-
-		# Формируем запрос на шорт по альте (рыночный)
-		order = OrderRequest(
-			symbol=self.cfg.alt_symbol,
-			side="SELL",
-			quantity=self.cfg.alt_order_qty,
-			leverage=self.cfg.leverage,
-			price=None,
-		)
-		res = self.exchange.place_order(order)
-		if res.success:
-			self.state.last_entry_ts = now_ts
-			self.state.position_side = "SELL"
-			self.state.position_qty = self.cfg.alt_order_qty
-			self.state.entry_price = alt.price
-			self.state.entry_ts = now_ts
-			self.log.info(f"Entered short: order_id={res.order_id} qty={self.state.position_qty} entry={self.state.entry_price}")
-		return res

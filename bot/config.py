@@ -25,8 +25,13 @@ class StrategyConfig:
 	# Размер ордера по альте (контракты/монеты). Упростим до количества монет.
 	alt_order_qty: float = 1.0
 
+	# Альтернативный сайзинг: размер позиции в USD (если задан, перекрывает alt_order_qty)
+	usd_notional: Optional[float] = None
+
 	# Плечо. Здесь логика проста, чтобы легко валидировать в dry-run
 	leverage: float = 3.0
+	# Режим маржи: использовать изолированную маржу (False -> cross)
+	use_isolated: bool = False
 
 	# Период опроса цен (секунд)
 	poll_interval_seconds: float = 2.0
