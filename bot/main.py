@@ -91,18 +91,43 @@ def run_live(
 	alt: str = typer.Option("ETHUSDT", help="Символ альты (например ETHUSDT)"),
 	threshold: float = typer.Option(1.0, help="Порог падения BTC от локального максимума (%)"),
 	lookback: int = typer.Option(300, help="Окно поиска локального максимума BTC (сек)"),
-	qty: float = typer.Option(1.0, help="Размер ордера по альте (монеты)"),
+	qty: float = typer.Option(1.0, help="Размер ордера по альте (монеты), если не используется --usd-notional"),
+	usd_notional: Optional[float] = typer.Option(None, help="Размер позиции в USD (перекрывает --qty)"),
 	leverage: float = typer.Option(3.0, help="Плечо"),
+	isolated: bool = typer.Option(False, help="Изоляция маржи (по умолчанию cross)"),
 	poll: float = typer.Option(2.0, help="Период опроса (сек)"),
 	sl: float = typer.Option(2.0, help="Стоп-лосс (%) от цены входа"),
 	tp: float = typer.Option(2.0, help="Тейк-профит (%) от цены входа"),
 	log_file: Optional[str] = typer.Option("/workspace/bot/logs/bot.log", help="Файл логов"),
 	trade_log: Optional[str] = typer.Option("/workspace/bot/logs/trades.csv", help="CSV лог сделок"),
 	dry_run: bool = typer.Option(True, help="Сухой режим клиента HL"),
+	hl_api_secret: Optional[str] = typer.Option(None, help="HL Private Key (hex) для реальных ордеров"),
+	use_testnet: bool = typer.Option(False, help="Использовать тестнет HL"),
 	verbose: bool = typer.Option(True, help="Подробный вывод"),
 ):
-	"""Работа с онлайн-ценами (Binance)."""
-	strategy = build_strategy_live(alt, threshold, lookback, qty, leverage, dry_run, verbose, sl, tp, log_file, trade_log)
+	"""Работа с онлайн-ценами; при падении BTC открывает шорт по альте с SL/TP.
+
+	Поддерживает USD-сайзинг (--usd-notional) и режим маржи (--isolated, --leverage).
+	Для реальных ордеров укажите --dry-run False и --hl-api-secret (и при необходимости --use-testnet False для мейннета).
+	"""
+	cfg = StrategyConfig(
+		btc_symbol="BTCUSDT",
+		alt_symbol=alt,
+		drop_pct_threshold=threshold,
+		lookback_seconds=lookback,
+		alt_order_qty=qty,
+		usd_notional=usd_notional,
+		leverage=leverage,
+		use_isolated=isolated,
+		stop_loss_pct=sl,
+		take_profit_pct=tp,
+		verbose=verbose,
+	)
+	logger = setup_logging(log_file, level=20)
+	pp = BinancePriceProvider()
+	hl = HyperliquidClient(HLConfig(api_secret=hl_api_secret, dry_run=dry_run), use_testnet=use_testnet)
+	trade_logger = TradeCsvLogger(trade_log) if trade_log else None
+	strategy = DropShortStrategy(cfg, pp, hl, trade_logger=trade_logger, logger=logger)
 	print("[bold green]Start live mode. Press Ctrl+C to stop.[/bold green]")
 	try:
 		while True:
