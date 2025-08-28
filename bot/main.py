@@ -287,5 +287,99 @@ def short(
 		logger.info("Stopped by user")
 
 
+@app.command()
+def simulate_btc_fall(
+	alt_symbol: str = typer.Option("ETHUSDT", help="Альта для входа (например ETHUSDT)"),
+	threshold: float = typer.Option(2.0, help="Порог падения BTC (%) для входа"),
+	qty: float = typer.Option(1.0, help="Размер позиции (монеты), если не используется --usd-notional"),
+	usd_notional: Optional[float] = typer.Option(None, help="Размер позиции в USD (если указан, перекрывает --qty)"),
+	sl: float = typer.Option(2.0, help="Стоп-лосс (%)"),
+	tp: float = typer.Option(2.0, help="Тейк-профит (%)"),
+	leverage: int = typer.Option(3, help="Плечо"),
+	isolated: bool = typer.Option(False, help="Изоляция маржи (по умолчанию cross)"),
+	interval: float = typer.Option(2.0, help="Интервал симуляции падения BTC (сек)"),
+	fall_step_pct: float = typer.Option(0.1, help="Шаг падения BTC за интервал (%)"),
+	log_file: Optional[str] = typer.Option("/workspace/bot/logs/bot.log", help="Файл логов"),
+	trade_log: Optional[str] = typer.Option("/workspace/bot/logs/trades.csv", help="CSV лог сделок"),
+	hl_api_secret: Optional[str] = typer.Option(None, help="HL Private Key (hex) для реальных ордеров на мейннете"),
+	use_testnet: bool = typer.Option(False, help="False для симуляции на мейннете (реальные средства)"),
+	verbose: bool = typer.Option(True, help="Подробный вывод"),
+):
+	"""Симуляция падения BTC каждые interval секунд; при падении >= threshold открывается реальный шорт на альте с SL/TP.
+
+	Внимание: при use_testnet=False и наличии приватного ключа будут ставиться РЕАЛЬНЫЕ ордера!
+	"""
+	logger = setup_logging(log_file, level=20)
+
+	# Источник цен: HL Info (мейннет/тестнет)
+	from hyperliquid.info import Info
+	from hyperliquid.utils.constants import MAINNET_API_URL, TESTNET_API_URL
+	from bot.prices import HLInfoPriceProvider
+	from bot.exchanges import HyperliquidClient, OrderRequest
+
+	base_url = TESTNET_API_URL if use_testnet else MAINNET_API_URL
+	info = Info(base_url=base_url, skip_ws=True)
+	pp = HLInfoPriceProvider(info)
+
+	hl = HyperliquidClient(HLConfig(api_secret=hl_api_secret, dry_run=False), use_testnet=use_testnet)
+	trade_logger = TradeCsvLogger(trade_log) if trade_log else None
+
+	# Инициализация уровней BTC
+	btc_tick = pp.get_price("BTCUSDT")
+	btc_start = btc_tick.price
+	btc_current = btc_start
+	logger.info(f"Sim start on {'TESTNET' if use_testnet else 'MAINNET'}: BTC start={btc_start:.2f} alt={alt_symbol}")
+
+	# Установка маржи
+	lev_res = hl.set_leverage_mode(alt_symbol, leverage=leverage, is_cross=not isolated)
+	if lev_res:
+		logger.info(f"Leverage mode set: {lev_res}")
+
+	entered = False
+	entry_ts = None
+	entry_price = None
+	qty_final = None
+
+	try:
+		while True:
+			# Синтетическое падение BTC
+			btc_current *= (1.0 - fall_step_pct / 100.0)
+			alt_tick = pp.get_price(alt_symbol)
+			alt_px = alt_tick.price
+			drawdown_pct = (btc_start - btc_current) / btc_start * 100.0
+			logger.info(f"Sim BTC={btc_current:.2f} (↓{drawdown_pct:.2f}%) ALT({alt_symbol})={alt_px:.4f}")
+
+			if (not entered) and drawdown_pct >= threshold:
+				# sizing USD->qty
+				qty_final = qty
+				if usd_notional is not None:
+					qty_final = usd_notional / alt_px
+					logger.info(f"Sizing by USD: {usd_notional} -> qty {qty_final}")
+				res = hl.place_order(OrderRequest(symbol=alt_symbol, side="SELL", quantity=qty_final, leverage=float(leverage), price=None))
+				if not res.success:
+					logger.error(f"Short open failed: {res.message}")
+					raise typer.Exit(code=1)
+				entered = True
+				entry_ts = time.time()
+				entry_price = alt_px
+				logger.info(f"Real short OPENED: qty={qty_final} entry={entry_price}")
+				# place triggers on-chain
+				if tp:
+					resp_tp = hl.place_trigger_exit(alt_symbol, qty_final, entry_price * (1.0 - tp / 100.0), tpsl="tp")
+					logger.info(f"TP trigger place: {resp_tp}")
+				if sl:
+					resp_sl = hl.place_trigger_exit(alt_symbol, qty_final, entry_price * (1.0 + sl / 100.0), tpsl="sl")
+					logger.info(f"SL trigger place: {resp_sl}")
+
+			if entered:
+				pnl = -(alt_px - entry_price) * qty_final
+				pnl_pct = -(alt_px - entry_price) / entry_price * 100.0
+				logger.info(f"PnL now: {pnl:.4f} ({pnl_pct:.2f}%)")
+
+			time.sleep(interval)
+	except KeyboardInterrupt:
+		logger.info("Stopped by user")
+
+
 if __name__ == "__main__":
 	app()
