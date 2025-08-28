@@ -8,12 +8,10 @@ What you need to run this file:
 - A private key (hex) of an EVM wallet authorized on Hyperliquid
 - Choose network: testnet or mainnet (recommended testnet first)
 
-How it works:
-- Creates Exchange with LocalAccount from your private key
-- Places a market short (market_open with is_buy=False via aggressive limit IoC)
-- Optionally places trigger exits (reduce-only, isMarket=True):
-  - TP: triggers on price drop (for short)
-  - SL: triggers on price rise (for short)
+Features:
+- Cross/Isolated leverage mode update
+- USD sizing (convert USD -> coin size by mid)
+- Place market short and trigger exits (reduce-only, isMarket=True) with proper price rounding
 
 Safety:
 - Test first on testnet
@@ -43,31 +41,32 @@ from hyperliquid.utils.constants import MAINNET_API_URL, TESTNET_API_URL
 USE_TESTNET: bool = True
 
 # Private key (hex string, with or without 0x). DO NOT COMMIT REAL KEYS!
-# Replace with your testnet wallet key. Keep this file out of version control if you put real keys.
 PRIVATE_KEY_HEX: str = "0xYOUR_PRIVATE_KEY_HEX"
 
-# Symbol selection
-# For SDK, use coin name like "ETH", not "ETHUSDT". We'll map below if needed.
-SYMBOL: str = "ETHUSDT"  # You can put "ETH", script will map ETHUSDT->ETH
+# Symbol selection (SDK uses coin name like "ETH")
+SYMBOL: str = "ETHUSDT"  # script maps to coin 'ETH'
 
-# Order params
-QTY: float = 0.01  # position size (coins)
+# Position sizing: choose one
+USE_USD_SIZING: bool = True
+USD_NOTIONAL: float = 20.0  # if USE_USD_SIZING=True
+COIN_SIZE: float = 0.003    # if USE_USD_SIZING=False
+
+# Leverage settings
+SET_LEVERAGE: bool = True
+LEVERAGE_VALUE: int = 3
+IS_CROSS: bool = False  # False -> isolated
+
+# Brackets as percentages from entry mid (approx)
 TAKE_PROFIT_PCT: Optional[float] = 1.0  # % below entry (short). None to skip
 STOP_LOSS_PCT: Optional[float] = 1.0    # % above entry (short). None to skip
 
-# Slippage for market_open pricing (SDK uses aggressive limit IoC)
+# Market slippage for aggressive limit IoC
 SLIPPAGE: float = 0.02  # 2%
 
 
 # ============================
-# IMPLEMENTATION
+# HELPERS
 # ============================
-
-@dataclass
-class OrderResult:
-	ok: bool
-	msg: str
-
 
 def coin_from_symbol(symbol: str) -> str:
 	if symbol.endswith("USDT"):
@@ -76,6 +75,17 @@ def coin_from_symbol(symbol: str) -> str:
 		return symbol[:-4]
 	return symbol
 
+
+def round_trigger_price(info: Info, coin: str, px: float) -> float:
+	asset = info.name_to_asset(coin)
+	is_spot = asset >= 10_000
+	decimals = (6 if not is_spot else 8) - info.asset_to_sz_decimals[asset]
+	return round(float(f"{px:.5g}"), decimals)
+
+
+# ============================
+# MAIN
+# ============================
 
 def main() -> None:
 	if not PRIVATE_KEY_HEX or PRIVATE_KEY_HEX.endswith("YOUR_PRIVATE_KEY_HEX"):
@@ -88,26 +98,36 @@ def main() -> None:
 
 	coin = coin_from_symbol(SYMBOL)
 
-	# Get mid as reference entry price
+	# Mid for sizing & reference
 	mids = info.all_mids()
 	if coin not in mids:
 		raise SystemExit(f"Coin {coin} not found in mids: keys={list(mids.keys())[:10]} ...")
 	mid = float(mids[coin])
 	print(f"Placing SHORT on {coin}, mid ~ {mid}")
 
-	# Market short (is_buy=False)
-	# SDK market_open computes aggressive limit with slippage and uses IoC.
-	resp = ex.market_open(name=coin, is_buy=False, sz=QTY, px=mid, slippage=SLIPPAGE)
+	# Optional: leverage mode update
+	if SET_LEVERAGE:
+		resp_lev = ex.update_leverage(leverage=LEVERAGE_VALUE, name=coin, is_cross=IS_CROSS)
+		print("Update leverage mode:", resp_lev)
+
+	# Sizing
+	if USE_USD_SIZING:
+		sz = USD_NOTIONAL / mid
+	else:
+		sz = COIN_SIZE
+
+	# Market short
+	resp = ex.market_open(name=coin, is_buy=False, sz=sz, px=mid, slippage=SLIPPAGE)
 	print("Market short response:", resp)
 
-	# Compute TP/SL absolute levels relative to mid (approx entry)
+	# Compute TP/SL absolute levels, then round to valid precision
 	tp_px: Optional[float] = None
 	sl_px: Optional[float] = None
 	if TAKE_PROFIT_PCT is not None:
-		tp_px = mid * (1.0 - TAKE_PROFIT_PCT / 100.0)
+		tp_px = round_trigger_price(info, coin, mid * (1.0 - TAKE_PROFIT_PCT / 100.0))
 		print(f"TP set at {tp_px}")
 	if STOP_LOSS_PCT is not None:
-		sl_px = mid * (1.0 + STOP_LOSS_PCT / 100.0)
+		sl_px = round_trigger_price(info, coin, mid * (1.0 + STOP_LOSS_PCT / 100.0))
 		print(f"SL set at {sl_px}")
 
 	# Place triggers (reduce-only, isMarket=True)
@@ -115,7 +135,7 @@ def main() -> None:
 		resp_tp = ex.order(
 			name=coin,
 			is_buy=True,  # close short
-			sz=QTY,
+			sz=sz,
 			limit_px=tp_px,
 			order_type={"trigger": {"isMarket": True, "triggerPx": tp_px, "tpsl": "tp"}},
 			reduce_only=True,
@@ -126,7 +146,7 @@ def main() -> None:
 		resp_sl = ex.order(
 			name=coin,
 			is_buy=True,  # close short
-			sz=QTY,
+			sz=sz,
 			limit_px=sl_px,
 			order_type={"trigger": {"isMarket": True, "triggerPx": sl_px, "tpsl": "sl"}},
 			reduce_only=True,
