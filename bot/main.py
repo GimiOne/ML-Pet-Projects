@@ -299,19 +299,24 @@ def simulate_btc_fall(
 	isolated: bool = typer.Option(False, help="Изоляция маржи (по умолчанию cross)"),
 	interval: float = typer.Option(2.0, help="Интервал симуляции падения BTC (сек)"),
 	fall_step_pct: float = typer.Option(0.1, help="Шаг падения BTC за интервал (%)"),
+	# ALT simulation controls
+	sim_alt: bool = typer.Option(False, help="Симулировать цену альты вместе с BTC"),
+	alt_mode: str = typer.Option("follow", help="Режим симуляции альты: follow|drop|rise"),
+	alt_beta: float = typer.Option(1.2, help="Чувствительность альты к шагу BTC при follow (alt_delta = beta * btc_delta)"),
+	close_on_sim_hit: bool = typer.Option(False, help="При срабатывании SL/TP на симулированной цене закрывать позицию реально"),
 	log_file: Optional[str] = typer.Option("/workspace/bot/logs/bot.log", help="Файл логов"),
 	trade_log: Optional[str] = typer.Option("/workspace/bot/logs/trades.csv", help="CSV лог сделок"),
-	hl_api_secret: Optional[str] = typer.Option(None, help="HL Private Key (hex) для реальных ордеров на мейннете"),
-	use_testnet: bool = typer.Option(False, help="False для симуляции на мейннете (реальные средства)"),
+	hl_api_secret: Optional[str] = typer.Option(None, help="HL Private Key (hex) для реальных ордеров на мейннете/тестнете"),
+	use_testnet: bool = typer.Option(False, help="False для мейннета (реальные средства)"),
 	verbose: bool = typer.Option(True, help="Подробный вывод"),
 ):
-	"""Симуляция падения BTC каждые interval секунд; при падении >= threshold открывается реальный шорт на альте с SL/TP.
+	"""Симуляция падения BTC каждые interval секунд; при падении >= threshold открывается шорт на альте с SL/TP.
 
-	Внимание: при use_testnet=False и наличии приватного ключа будут ставиться РЕАЛЬНЫЕ ордера!
+	- Можно симулировать и цену альты (sim_alt), чтобы проверить срабатывание SL/TP
+	- При close_on_sim_hit=True будет реальный выход маркетом, когда симулированная цена достигнет SL/TP
 	"""
 	logger = setup_logging(log_file, level=20)
 
-	# Источник цен: HL Info (мейннет/тестнет)
 	from hyperliquid.info import Info
 	from hyperliquid.utils.constants import MAINNET_API_URL, TESTNET_API_URL
 	from bot.prices import HLInfoPriceProvider
@@ -324,36 +329,60 @@ def simulate_btc_fall(
 	hl = HyperliquidClient(HLConfig(api_secret=hl_api_secret, dry_run=False), use_testnet=use_testnet)
 	trade_logger = TradeCsvLogger(trade_log) if trade_log else None
 
-	# Инициализация уровней BTC
+	# Initialize BTC and ALT
 	btc_tick = pp.get_price("BTCUSDT")
 	btc_start = btc_tick.price
 	btc_current = btc_start
-	logger.info(f"Sim start on {'TESTNET' if use_testnet else 'MAINNET'}: BTC start={btc_start:.2f} alt={alt_symbol}")
+	alt_real_tick = pp.get_price(alt_symbol)
+	alt_real_start = alt_real_tick.price
+	alt_sim = alt_real_start
+	logger.info(f"Sim start on {'TESTNET' if use_testnet else 'MAINNET'}: BTC start={btc_start:.2f} ALT({alt_symbol}) start(real)={alt_real_start:.4f}")
 
-	# Установка маржи
+	# Set leverage mode
 	lev_res = hl.set_leverage_mode(alt_symbol, leverage=leverage, is_cross=not isolated)
 	if lev_res:
 		logger.info(f"Leverage mode set: {lev_res}")
 
 	entered = False
 	entry_ts = None
-	entry_price = None
+	entry_price_real = None
+	entry_price_sim = None
 	qty_final = None
 
 	try:
 		while True:
-			# Синтетическое падение BTC
+			# Simulate BTC drop step
 			btc_current *= (1.0 - fall_step_pct / 100.0)
-			alt_tick = pp.get_price(alt_symbol)
-			alt_px = alt_tick.price
 			drawdown_pct = (btc_start - btc_current) / btc_start * 100.0
-			logger.info(f"Sim BTC={btc_current:.2f} (↓{drawdown_pct:.2f}%) ALT({alt_symbol})={alt_px:.4f}")
+
+			# Real ALT price (for logging)
+			alt_real_tick = pp.get_price(alt_symbol)
+			alt_real_px = alt_real_tick.price
+
+			# Sim ALT path (optional)
+			if sim_alt:
+				btc_step_delta = -fall_step_pct
+				if alt_mode.lower() == "follow":
+					alt_step = btc_step_delta * alt_beta
+				elif alt_mode.lower() == "drop":
+					alt_step = -abs(fall_step_pct)
+				elif alt_mode.lower() == "rise":
+					alt_step = abs(fall_step_pct)
+				else:
+					alt_step = btc_step_delta * alt_beta
+				alt_sim *= (1.0 + alt_step / 100.0)
+
+			logger.info(
+				f"Sim BTC={btc_current:.2f} (↓{drawdown_pct:.2f}%) ALT_real({alt_symbol})={alt_real_px:.4f}"
+				+ (f" ALT_sim={alt_sim:.4f} mode={alt_mode} beta={alt_beta}" if sim_alt else "")
+			)
 
 			if (not entered) and drawdown_pct >= threshold:
 				# sizing USD->qty
 				qty_final = qty
+				ref_px_for_sizing = alt_sim if sim_alt else alt_real_px
 				if usd_notional is not None:
-					qty_final = usd_notional / alt_px
+					qty_final = usd_notional / ref_px_for_sizing
 					logger.info(f"Sizing by USD: {usd_notional} -> qty {qty_final}")
 				res = hl.place_order(OrderRequest(symbol=alt_symbol, side="SELL", quantity=qty_final, leverage=float(leverage), price=None))
 				if not res.success:
@@ -361,25 +390,54 @@ def simulate_btc_fall(
 					raise typer.Exit(code=1)
 				entered = True
 				entry_ts = time.time()
-				entry_price = alt_px
-				logger.info(f"Real short OPENED: qty={qty_final} entry={entry_price}")
-				# place triggers on-chain
+				entry_price_real = alt_real_px
+				entry_price_sim = alt_sim
+				logger.info(f"Real short OPENED: qty={qty_final} entry_real={entry_price_real:.6f} entry_sim={entry_price_sim:.6f}")
+				# place on-chain triggers for real market behavior
 				if tp:
-					resp_tp = hl.place_trigger_exit(alt_symbol, qty_final, entry_price * (1.0 - tp / 100.0), tpsl="tp")
+					resp_tp = hl.place_trigger_exit(alt_symbol, qty_final, entry_price_real * (1.0 - tp / 100.0), tpsl="tp")
 					logger.info(f"TP trigger place: {resp_tp}")
 				if sl:
-					resp_sl = hl.place_trigger_exit(alt_symbol, qty_final, entry_price * (1.0 + sl / 100.0), tpsl="sl")
+					resp_sl = hl.place_trigger_exit(alt_symbol, qty_final, entry_price_real * (1.0 + sl / 100.0), tpsl="sl")
 					logger.info(f"SL trigger place: {resp_sl}")
 
 			if entered:
-				pnl = -(alt_px - entry_price) * qty_final
-				pnl_pct = -(alt_px - entry_price) / entry_price * 100.0
-				logger.info(f"PnL now: {pnl:.4f} ({pnl_pct:.2f}%)")
+				# Live PnL by real price
+				pnl_real = -(alt_real_px - entry_price_real) * qty_final
+				pnl_real_pct = -(alt_real_px - entry_price_real) / entry_price_real * 100.0
+				# Sim PnL by simulated price (if enabled)
+				pnl_sim = None
+				pnl_sim_pct = None
+				if sim_alt:
+					pnl_sim = -(alt_sim - entry_price_sim) * qty_final
+					pnl_sim_pct = -(alt_sim - entry_price_sim) / entry_price_sim * 100.0
+				logger.info(
+					f"PnL real: {pnl_real:.4f} ({pnl_real_pct:.2f}%)"
+					+ (f" | PnL sim: {pnl_sim:.4f} ({pnl_sim_pct:.2f}%)" if sim_alt else "")
+				)
+
+				# Simulated SL/TP hit handling (optional)
+				if sim_alt:
+					hit_tp = alt_sim <= entry_price_sim * (1.0 - tp / 100.0) if tp else False
+					hit_sl = alt_sim >= entry_price_sim * (1.0 + sl / 100.0) if sl else False
+					if hit_tp or hit_sl:
+						reason = "tp" if hit_tp else "sl"
+						logger.info(f"SIM {reason.upper()} HIT at alt_sim={alt_sim:.6f}")
+						if close_on_sim_hit:
+							close_res = hl.close_position(alt_symbol, qty_final, side="SELL")
+							logger.info(f"Real market close on SIM hit: {close_res}")
+							break
 
 			time.sleep(interval)
 	except KeyboardInterrupt:
 		logger.info("Stopped by user")
 
+
+# Register alias so underscores also work
+try:
+	app.command(name="simulate_btc_fall")(simulate_btc_fall)  # alias for simulate-btc-fall
+except Exception:
+	pass
 
 if __name__ == "__main__":
 	app()
