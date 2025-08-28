@@ -115,9 +115,58 @@ python3 -m bot.main simulate-btc-fall \
 - --use-testnet (bool)
 - --verbose (bool)
 
-### run-live — стратегия на Binance (dry-run)
-- --alt (str), --threshold (float), --lookback (сек), --qty (float), --leverage (float)
-- --sl / --tp (float), --poll (сек), --log-file, --trade-log, --dry-run, --verbose
+### run-live — стратегия в реальном времени (Binance цены, вход на HL)
+- Описание: опрашивает Binance цены, вычисляет BTC drawdown за окно `--lookback`. Когда падение ≥ `--threshold`, входит в шорт по `--alt`, сайзит позицию по `--usd-notional` или `--qty`, устанавливает маржу cross/isolated, плечо, и размещает SL/TP триггеры на HL.
+- Флаги:
+  - `--alt` (str): символ альты, напр. ETHUSDT
+  - `--threshold` (float, %): порог падения BTC от локального максимума
+  - `--lookback` (сек): окно поиска локального максимума BTC
+  - `--usd-notional` (float): размер позиции в USD (перекрывает `--qty`)
+  - `--qty` (float): размер позиции (монеты), если не указан `--usd-notional`
+  - `--leverage` (float): плечо, устанавливается в режиме маржи
+  - `--isolated` (bool): изолированная маржа (по умолчанию cross)
+  - `--sl`/`--tp` (float, %): стоп‑лосс/тейк‑профит от цены входа (ставятся как триггер‑ордера)
+  - `--poll` (сек): период опроса
+  - `--log-file` (str): файл логов, по умолчанию `/workspace/bot/logs/bot.log`
+  - `--trade-log` (str): CSV лог сделок, по умолчанию `/workspace/bot/logs/trades.csv`
+  - `--use-testnet` (bool): тестнет (True) или мейннет (False)
+  - `--hl-api-secret` (hex): приватный ключ кошелька для реальных ордеров
+  - `--dry-run` (bool): сухой режим
+  - `--verbose` (bool)
+
+- Пример (тестнет):
+```bash
+python3 -m bot.main run-live \
+  --alt ETHUSDT \
+  --threshold 2.0 --lookback 300 \
+  --usd-notional 50 --leverage 3 --isolated \
+  --sl 1.0 --tp 1.0 \
+  --poll 2 \
+  --log-file /workspace/bot/logs/bot.log \
+  --trade-log /workspace/bot/logs/trades.csv \
+  --use-testnet \
+  --hl-api-secret 0xYOUR_TESTNET_PRIVATE_KEY_HEX \
+  --dry-run False
+```
+- Пример (мейннет, реальные средства!):
+```bash
+python3 -m bot.main run-live \
+  --alt ETHUSDT \
+  --threshold 2.0 --lookback 300 \
+  --usd-notional 50 --leverage 3 --isolated \
+  --sl 1.0 --tp 1.0 \
+  --poll 2 \
+  --log-file /workspace/bot/logs/bot.log \
+  --trade-log /workspace/bot/logs/trades.csv \
+  --use-testnet False \
+  --hl-api-secret 0xYOUR_MAINNET_PRIVATE_KEY_HEX \
+  --dry-run False
+```
+
+### Как интерпретировать BTC drawdown
+- Рассчитывается как падение текущей цены от локального максимума в окне `--lookback`:
+  drawdown% = (local_max - current_price) / local_max * 100.
+- Обновляется на каждом тике, но если в окне ещё не появился новый максимум выше текущего, показатель может долго оставаться близким к прежнему значению или 0.0%, даже если BTC «шевелится» в узком диапазоне. Значение быстро меняется при новых экстремумах (обновлении max), либо при значимых движениях вниз от недавно сформированного максимума.
 
 ### manual-once / manual-replay — ручные цены
 - manual-once: --btc, --alt, --alt-symbol, --threshold, --lookback, --qty, --leverage, --sl, --tp, --log-file, --trade-log, --dry-run, --verbose
