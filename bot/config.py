@@ -31,15 +31,20 @@ class StrategyConfig:
 	# Период опроса цен (секунд)
 	poll_interval_seconds: float = 2.0
 
+	# Стоп-лосс и тейк-профит (в процентах), применяются к цене входа позиции.
+	# Для шорта: SL срабатывает при росте цены на sl_pct, TP — при падении цены на tp_pct.
+	stop_loss_pct: float = 2.0
+	take_profit_pct: float = 2.0
+
 	# Включить подробный вывод (для отладки)
 	verbose: bool = True
 
 
 @dataclass
 class HLConfig:
-	"""Конфиг клиента Hyperliquid (здесь сухой режим по умолчанию)."""
+	"""Конфиг клиента Hyperliquid (здесь dry_run по умолчанию)."""
 
 	api_key: Optional[str] = None
 	api_secret: Optional[str] = None
-	base_url: str = "https://api.hyperliquid.xyz"
+	base_url: str = "https://api.hyperliquid.com"
 	dry_run: bool = True
